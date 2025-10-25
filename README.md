@@ -1,76 +1,69 @@
-[![progress-banner](https://backend.codecrafters.io/progress/sqlite/7f7f3de4-58fc-4949-ae35-f19789fc9d78)](https://app.codecrafters.io/users/codecrafters-bot?r=2qF)
+# SQLite Clone in Zig
 
-This is a starting point for Zig solutions to the
-["Build Your Own SQLite" Challenge](https://codecrafters.io/challenges/sqlite).
+This is a clone of the SQLite database built from scratch in Zig. This project was undertaken as a personal deep dive to understand how modern databases work at the lowest level, from file format and page parsing to B-Tree data structures.
 
-In this challenge, you'll build a barebones SQLite implementation that supports
-basic SQL queries like `SELECT`. Along the way we'll learn about
-[SQLite's file format](https://www.sqlite.org/fileformat.html), how indexed data
-is
-[stored in B-trees](https://jvns.ca/blog/2014/10/02/how-does-sqlite-work-part-2-btrees/)
-and more.
+This implementation is not a complete SQL database but successfully parses a real `.db` file, reads the schema, and traverses the B-Tree to extract metadata.
 
-**Note**: If you're viewing this repo on GitHub, head over to
-[codecrafters.io](https://codecrafters.io) to try the challenge.
+## Why This Project?
 
-# Passing the first stage
+The goal was not to build a production-ready database, but to answer these questions by writing code:
+* How is data *really* stored on disk by a database?
+* How does the B-Tree, a data structure I've only seen in textbooks, work in practice?
+* How does SQLite manage variable-length data and schema in a single file?
+* How can a low-level language like Zig be used for performance-critical parsing and file I/O?
 
-The entry point for your SQLite implementation is in `src/main.zig`. Study and
-uncomment the relevant code, and push your changes to pass the first stage:
+## Features Implemented
+* **Database File Header Parsing:** Reads the 100-byte header to validate the file and extract the page size.
+* **B-Tree Traversal:** Implements a stack-based (DFS) traversal of the B-Tree to visit all nodes.
+* **Page Parsing:** Differentiates between B-Tree interior pages (`0x05`) and leaf pages (`0x0D`).
+* **Schema Reading:** Successfully walks the `sqlite_schema` table (always on page 1) to count the number of tables in the database.
+* **Varint Parsing:** Implements a `varint` parser to correctly read variable-length integers (like keys) from the page data.
 
-```sh
-git commit -am "pass 1st stage" # any msg
-git push origin master
+## Technical Deep Dive: Walking the B-Tree
+
+The most challenging part was parsing the B-Tree. The `btree_walk` function recursively explores the database's internal tree structure. It starts at the root page (page 1) and uses a stack to perform a depth-first search.
+
+For each page, it:
+1.  Parses the page header to find the page type (Interior vs. Leaf) and number of cells.
+2.  If it's an **Interior Page** (`0x05`), it reads each cell, parses the `varint` key, and finds the child page number to add to the stack.
+3.  If it's a **Leaf Page** (`0x0D`), it counts the cells, which represent the actual data (in this case, table definitions).
+
+This snippet shows the core logic for reading a child page pointer from an interior node cell:
+
+```zig
+// (Inside btree_walk function)
+// For each cell in an Interior Page...
+for (cell_pointer_array) |value| {
+    const file_offset: u16 = value;
+
+    // ...Find the 4-byte page number at the start of the cell
+    const number_arr: *const [4]u8 = @ptrCast(&page.data[(file_offset - header_size) .. (file_offset - header_size) + 4]);
+    const page_number = std.mem.readInt(u32, number_arr, .big);
+
+    // ... (Varint key parsing omitted for brevity) ...
+
+    // Now, seek to that child page and add it to the stack
+    var page_buf_under: [4096]u8 = undefined;
+    _ = try file.seekTo((page_number - 1) * 4096); // Seek to the start of the new page
+    _ = try file.read(&page_buf_under);
+
+    var page_under: btree_page_table_t = undefined;
+    page_under.page_header.parse(&page_buf_under);
+    page_under.data = page_buf_under[header_size_under..];
+
+    try stack.append(page_under); // Add new page to the DFS stack
+}
 ```
-
-Time to move on to the next stage!
-
-# Stage 2 & beyond
-
-Note: This section is for stages 2 and beyond.
-
-1. Ensure you have `zig (0.13+)` installed locally
-1. Run `./your_program.sh` to run your program, which is implemented in
-   `src/main.zig`.
-1. Commit your changes and run `git push origin master` to submit your solution
-   to CodeCrafters. Test output will be streamed to your terminal.
-
-# Sample Databases
-
-To make it easy to test queries locally, we've added a sample database in the
-root of this repository: `sample.db`.
-
-This contains two tables: `apples` & `oranges`. You can use this to test your
-implementation for the first 6 stages.
-
-You can explore this database by running queries against it like this:
-
-```sh
-$ sqlite3 sample.db "select id, name from apples"
-1|Granny Smith
-2|Fuji
-3|Honeycrisp
-4|Golden Delicious
+## How to Run
+1. Ensure you have zig (0.13+) installed.
+2. Clone the repository: ```git clone https://github.com/shreyasganesh0/sqlite-clone-zig.git```
+3. Build the project: ```zig build```
+4. Run the .dbinfo command on a sample database:
 ```
-
-There are two other databases that you can use:
-
-1. `superheroes.db`:
-   - This is a small version of the test database used in the table-scan stage.
-   - It contains one table: `superheroes`.
-   - It is ~1MB in size.
-1. `companies.db`:
-   - This is a small version of the test database used in the index-scan stage.
-   - It contains one table: `companies`, and one index: `idx_companies_country`
-   - It is ~7MB in size.
-
-These aren't included in the repository because they're large in size. You can
-download them by running this script:
-
-```sh
-./download_sample_databases.sh
+ ./zig-out/bin/main sample.db .dbinfo
 ```
-
-If the script doesn't work for some reason, you can download the databases
-directly from
-[codecrafters-io/sample-sqlite-databases](https://github.com/codecrafters-io/sample-sqlite-databases).
+Output:
+```
+database page size: 4096
+number of tables: 2
+```
